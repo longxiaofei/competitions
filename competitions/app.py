@@ -2,9 +2,11 @@ import datetime
 import os
 import threading
 import time
+import io
+from typing import Dict, Any
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile, Body
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from huggingface_hub import hf_hub_download
@@ -101,7 +103,7 @@ templates = Jinja2Templates(directory=templates_path)
 
 
 @app.get("/", response_class=HTMLResponse)
-async def read_form(request: Request):
+def read_form(request: Request):
     """
     This function is used to render the HTML file
     :param request:
@@ -121,14 +123,23 @@ async def read_form(request: Request):
 
 
 @app.get("/login_status", response_class=JSONResponse)
-async def use_oauth(request: Request, user_token: str = Depends(utils.user_authentication)):
+def use_oauth(request: Request, user_token: str = Depends(utils.user_authentication)):
+    result = {
+        "is_login": False,
+        "is_admin": False,
+        "is_registered": False,
+    }
+
+    comp_org = COMPETITION_ID.split("/")[0]
     if user_token:
-        return {"response": 2}
-    return {"response": 1}
+        result["is_login"] = True
+        result["is_admin"] = utils.is_user_admin(user_token, comp_org)
+        result["is_registered"] = utils.team_file_api.get_team_info(user_token) is not None
+    return {"response": result}
 
 
 @app.get("/logout", response_class=HTMLResponse)
-async def user_logout(request: Request):
+def user_logout(request: Request):
     """Endpoint that logs out the user (e.g. delete cookie session)."""
 
     if "oauth_info" in request.session:
@@ -147,7 +158,7 @@ async def user_logout(request: Request):
 
 
 @app.get("/competition_info", response_class=JSONResponse)
-async def get_comp_info(request: Request):
+def get_comp_info(request: Request):
     competition_info = CompetitionInfo(competition_id=COMPETITION_ID, autotrain_token=HF_TOKEN)
     info = competition_info.competition_desc
     resp = {"response": info}
@@ -155,7 +166,7 @@ async def get_comp_info(request: Request):
 
 
 @app.get("/dataset_info", response_class=JSONResponse)
-async def get_dataset_info(request: Request):
+def get_dataset_info(request: Request):
     competition_info = CompetitionInfo(competition_id=COMPETITION_ID, autotrain_token=HF_TOKEN)
     info = competition_info.dataset_desc
     resp = {"response": info}
@@ -163,7 +174,7 @@ async def get_dataset_info(request: Request):
 
 
 @app.get("/rules", response_class=JSONResponse)
-async def get_rules(request: Request):
+def get_rules(request: Request):
     competition_info = CompetitionInfo(competition_id=COMPETITION_ID, autotrain_token=HF_TOKEN)
     if competition_info.rules is not None:
         return {"response": competition_info.rules}
@@ -171,7 +182,7 @@ async def get_rules(request: Request):
 
 
 @app.get("/submission_info", response_class=JSONResponse)
-async def get_submission_info(request: Request):
+def get_submission_info(request: Request):
     competition_info = CompetitionInfo(competition_id=COMPETITION_ID, autotrain_token=HF_TOKEN)
     info = competition_info.submission_desc
     resp = {"response": info}
@@ -179,7 +190,7 @@ async def get_submission_info(request: Request):
 
 
 @app.post("/leaderboard", response_class=JSONResponse)
-async def fetch_leaderboard(
+def fetch_leaderboard(
     request: Request, body: LeaderboardRequest, user_token: str = Depends(utils.user_authentication)
 ):
     lb = body.lb
@@ -215,7 +226,7 @@ async def fetch_leaderboard(
 
 
 @app.post("/my_submissions", response_class=JSONResponse)
-async def my_submissions(request: Request, user_token: str = Depends(utils.user_authentication)):
+def my_submissions(request: Request, user_token: str = Depends(utils.user_authentication)):
     competition_info = CompetitionInfo(competition_id=COMPETITION_ID, autotrain_token=HF_TOKEN)
     if user_token is None:
         return {
@@ -253,7 +264,7 @@ async def my_submissions(request: Request, user_token: str = Depends(utils.user_
     submission_text = SUBMISSION_TEXT.format(competition_info.submission_limit)
     submission_selection_text = SUBMISSION_SELECTION_TEXT.format(competition_info.selection_limit)
 
-    team_name = utils.get_team_name(user_token, COMPETITION_ID, HF_TOKEN)
+    team_name = utils.team_file_api.get_team_info(user_token)["name"]
 
     resp = {
         "response": {
@@ -267,7 +278,7 @@ async def my_submissions(request: Request, user_token: str = Depends(utils.user_
 
 
 @app.post("/new_submission", response_class=JSONResponse)
-async def new_submission(
+def new_submission(
     request: Request,
     submission_file: UploadFile = File(None),
     hub_model: str = Form(...),
@@ -358,14 +369,14 @@ def update_team_name(
         return {"success": False, "error": "Team name cannot be empty."}
 
     try:
-        utils.update_team_name(user_token, new_team_name, COMPETITION_ID, HF_TOKEN)
+        utils.team_file_api.update_and_create_team_name(user_token, new_team_name)
         return {"success": True, "error": ""}
     except Exception as e:
         return {"success": False, "error": str(e)}
 
 
 @app.post("/admin/comp_info", response_class=JSONResponse)
-async def admin_comp_info(request: Request, user_token: str = Depends(utils.user_authentication)):
+def admin_comp_info(request: Request, user_token: str = Depends(utils.user_authentication)):
     comp_org = COMPETITION_ID.split("/")[0]
     user_is_admin = utils.is_user_admin(user_token, comp_org)
     if not user_is_admin:
@@ -404,7 +415,7 @@ async def admin_comp_info(request: Request, user_token: str = Depends(utils.user
 
 
 @app.post("/admin/update_comp_info", response_class=JSONResponse)
-async def update_comp_info(request: Request, user_token: str = Depends(utils.user_authentication)):
+def update_comp_info(data: Dict[str, Any] = Body(...), user_token: str = Depends(utils.user_authentication)):
     comp_org = COMPETITION_ID.split("/")[0]
     user_is_admin = utils.is_user_admin(user_token, comp_org)
     if not user_is_admin:
@@ -412,7 +423,6 @@ async def update_comp_info(request: Request, user_token: str = Depends(utils.use
 
     competition_info = CompetitionInfo(competition_id=COMPETITION_ID, autotrain_token=HF_TOKEN)
 
-    data = await request.json()
     config = data["config"]
     markdowns = data["markdowns"]
 
@@ -445,3 +455,31 @@ async def update_comp_info(request: Request, user_token: str = Depends(utils.use
         return {"success": False}, 500
 
     return {"success": True}
+
+
+@app.get("/register_template_file")
+def register_example_file():
+    file_path = os.path.join(BASE_DIR, "static", "Competition Participants Information Collection Template.xlsx")
+    return FileResponse(file_path, media_type="application/octet-stream", filename="Competition Participants Information Collection Template.xlsx")
+
+
+@app.post("/register")
+def register(
+    teamname: str = Form(...),
+    file: UploadFile = Form(...),
+    user_token: str = Depends(utils.user_authentication)
+):
+    if user_token is None:
+        return {"success": False, "response": "Please login."}
+
+    file_bytes = file.file.read()
+    file_stream = io.BytesIO(file_bytes)
+    file_stream.seek(0)
+
+    utils.team_file_api.create_team(
+        user_token,
+        teamname,
+        file_stream
+    )
+
+    return {"success": True, "response": "Team created successfully."}

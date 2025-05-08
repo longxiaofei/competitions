@@ -140,15 +140,16 @@
                     })
                     .then(data => {
                         const contentDiv = document.getElementById('content');
+                        const teamNameDiv = `
+                            <div class="flex items-center">
+                                <input type="text" name="team_name" id="team_name" class="mt-1 mb-1 block me-2" value="${data.response.team_name}">
+                                <button id="updateTeamNameButton" type="button" class="confirm text-white bg-green-600 hover:bg-green-800 focus:ring-4 focus:outline-none focus:ring-green-300 font-medium rounded-lg text-sm inline-flex items-center px-5 py-2.5 text-center me-2">Update Team Name</button>
+                            </div>`;
                         // console.log(data.response.submissions);
                         // contentDiv.innerHTML = marked.parse(data.response.submission_text) + data.response.submissions;
                         if (data.response.submissions && data.response.submissions.length > 0 && data.response.error.length == 0) {
                             // Start building the table HTML
-                            let tableHTML = `
-                                <div class="flex items-center">
-                                    <input type="text" name="team_name" id="team_name" class="mt-1 mb-1 block me-2" value="${data.response.team_name}">
-                                    <button id="updateTeamNameButton" type="button" class="confirm text-white bg-green-600 hover:bg-green-800 focus:ring-4 focus:outline-none focus:ring-green-300 font-medium rounded-lg text-sm inline-flex items-center px-5 py-2.5 text-center me-2">Update Team Name</button>
-                                </div>`;
+                            let tableHTML = teamNameDiv;
                             tableHTML += '<table border="1"><tr><th>Datetime</th><th>Submission ID</th><th>Public Score</th><th>Submission Comment</th><th>Selected</th><th>Status</th></tr>';
 
                             // Iterate over each submission and add it to the table
@@ -171,13 +172,13 @@
                             document.getElementById('updateSelectedSubmissionsButton').addEventListener('click', function () {
                                 updateSelectedSubmissions();
                             });
-                            document.getElementById('updateTeamNameButton').addEventListener('click', function () {
-                                updateTeamName();
-                            });
                         } else {
                             // Display message if there are no submissions
-                            contentDiv.innerHTML = marked.parse(data.response.submission_text) + marked.parse(data.response.error);
+                            contentDiv.innerHTML = teamNameDiv + marked.parse(data.response.submission_text) + marked.parse(data.response.error);
                         }
+                        document.getElementById('updateTeamNameButton').addEventListener('click', function () {
+                            updateTeamName();
+                        });
                         articleLoadingSpinner.classList.add('hidden');
                     })
                     .catch(error => {
@@ -342,12 +343,25 @@
 
         function checkOAuth() {
             var url = "/login_status";
-            makeApiRequest(url, function (response) {
-                if (response === 1) {
+            makeApiRequest(url, function ({is_login, is_admin, is_registered}) {
+                const registerRemoveStyle = ["pointer-events-none", "text-gray-400", "cursor-not-allowed"];
+                const registerNewStyle = ["ext-gray-900", "hover:bg-gray-100"]
+                if (is_login) {
+                    document.getElementById("loginButton").style.display = "none";
+                    document.getElementById("logoutButton").style.display = "block";
+                } else {
                     document.getElementById("loginButton").style.display = "block";
                     document.getElementById("logoutButton").style.display = "none";
-                } else if (response === 2) {
-                    document.getElementById("loginButton").style.display = "none";
+                }
+                if (is_admin) {
+                    document.getElementById("admin").classList.remove("hidden");
+                }
+                if (is_registered) {
+                    document.getElementById("my_submissions").classList.remove(...registerRemoveStyle);
+                    document.getElementById("my_submissions").classList.add(...registerNewStyle);
+                    document.getElementById("new_submission").classList.remove(...registerRemoveStyle);
+                    document.getElementById("new_submission").classList.add(...registerNewStyle);
+                } else {
                     document.getElementById("logoutButton").style.display = "block";
                 }
             });
@@ -459,19 +473,19 @@
                         </li>
                         <li>
                             <a href="#" id="my_submissions"
-                                class="flex items-center w-full p-2 text-gray-900 transition duration-75 rounded-lg pl-11 group hover:bg-gray-100">My
+                                class="flex items-center w-full p-2 transition duration-75 rounded-lg pl-11 group pointer-events-none text-gray-400 cursor-not-allowed">My
                                 submissions</a>
                         </li>
                         <li>
                             <a href="#" id="new_submission"
-                                class="flex items-center w-full p-2 text-gray-900 transition duration-75 rounded-lg pl-11 group hover:bg-gray-100">New
+                                class="flex items-center w-full p-2 transition duration-75 rounded-lg pl-11 group pointer-events-none text-gray-400 cursor-not-allowed">New
                                 submission</a>
                         </li>
                     </ul>
                 </li>
                 <li>
                     <a href="#" id="admin"
-                        class="flex items-center p-2 text-gray-900 rounded-lg hover:bg-gray-100 group">
+                        class="flex items-center p-2 text-gray-900 rounded-lg hover:bg-gray-100 group hidden">
                         <svg class="flex-shrink-0 w-5 h-5 text-gray-500 transition duration-75 group-hover:text-gray-900"
                             aria-hidden="true" xmlns="http://www.w3.org/2000/svg" fill="currentColor"
                             viewBox="0 0 24 24">
@@ -479,6 +493,12 @@
                                 d="M12 15.5c-1.93 0-3.5-1.57-3.5-3.5s1.57-3.5 3.5-3.5 3.5 1.57 3.5 3.5-1.57 3.5-3.5 3.5zm7.43-3.5c.04-.33.07-.66.07-1s-.03-.67-.07-1l2.11-1.65c.19-.15.23-.42.12-.63l-2-3.46c-.11-.21-.35-.3-.57-.24l-2.49 1c-.52-.4-1.08-.73-1.69-.98l-.38-2.65C14.57 2.18 14.3 2 14 2h-4c-.3 0-.57.18-.64.45L8.98 5.1c-.61.25-1.17.58-1.69.98l-2.49-1c-.22-.06-.46.03-.57.24l-2 3.46c-.11.21-.07.48.12.63l2.11 1.65c-.04.33-.07.66-.07 1s.03.67.07 1L2.46 14.1c-.19.15-.23.42-.12.63l2 3.46c.11.21.35.3.57.24l2.49-1c.52.4 1.08.73 1.69.98l.38 2.65c.07.27.34.45.64.45h4c.3 0 .57-.18.64-.45l.38-2.65c.61-.25 1.17-.58 1.69-.98l2.49 1c.22.06.46-.03.57-.24l2-3.46c.11-.21.07-.48-.12-.63l-2.11-1.65zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5z" />
                         </svg>
                         <span class="flex-1 ms-3 whitespace-nowrap">Admin</span>
+                    </a>
+                </li>
+                <li id="registerButton" style="display: none;">
+                    <a href="#"
+                        class="flex justify-center items-center bg-blue-400 hover:bg-blue-600 text-white text-center font-bold py-2 px-4 rounded transition duration-200 ease-in-out">
+                        Register
                     </a>
                 </li>
                 <li id="loginButton" style="display: none;">
@@ -646,6 +666,53 @@
                     <button id="save-button" class="mt-4 px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-700">
                         Save
                     </button>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div id="register-modal" tabindex="-1"
+        class="hidden fixed inset-0 z-40 flex items-center justify-center w-full h-full bg-black bg-opacity-50">
+        <div class="relative w-full max-w-xl p-4">
+            <div class="relative bg-white rounded-lg shadow-2xl">
+                <button type="button"
+                    class="absolute top-3 right-3 text-gray-400 bg-transparent hover:bg-gray-200 hover:text-gray-900 rounded-lg text-sm w-8 h-8 inline-flex justify-center items-center"
+                    data-modal-hide="register-modal">
+                    <svg class="w-4 h-4" aria-hidden="true" xmlns="http://www.w3.org/2000/svg" fill="none"
+                        viewBox="0 0 14 14">
+                        <path stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="m1 1 6 6m0 0 6 6M7 7l6-6M7 7l-6 6" />
+                    </svg>
+                    <span class="sr-only">Close</span>
+                </button>
+                <div class="p-6 md:p-8 text-center">
+                    <form id="registerForm" class="max-w-md mx-auto p-6 bg-white rounded-lg shadow space-y-4">
+                        <div class="grid grid-cols-3 items-center gap-4">
+                          <label for="teamname" class="text-sm font-medium text-gray-700 text-right">Team Name</label>
+                          <input type="text" id="teamname" name="teamname"
+                            class="col-span-2 px-4 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+                        </div>
+                      
+                        <div class="grid grid-cols-3 items-center gap-4">
+                          <label for="reigsterFile" class="text-sm font-medium text-gray-700 text-right">Team Datas</label>
+                          <input type="file" id="reigsterFile" name="reigsterFile"
+                            class="col-span-2 text-sm text-gray-500 file:mr-4 file:py-2 file:px-4
+                                   file:rounded-md file:border-0
+                                   file:text-sm file:font-semibold
+                                   file:bg-blue-50 file:text-blue-700
+                                   hover:file:bg-blue-100">
+                        </div>
+                        <p class="mt-1 text-xs text-gray-500">
+                            Please upload a .xlsx file with the following format: <br> 
+                            <a href="/register_template_file" download class="text-blue-600 hover:underline">Download here</a>.
+                        </p>
+                        <p id="errorMessage" class="text-red-600 text-sm hidden"></p>
+                        <button type="submit"
+                          id="submitRegisterButton"
+                          class="w-full bg-blue-600 text-white py-2 px-4 rounded-md hover:bg-blue-700 transition disabled:bg-blue-800 disabled:opacity-80 disabled:cursor-not-allowed">
+                          Submit
+                        </button>
+                      </form>
+                      
                 </div>
             </div>
         </div>
@@ -945,6 +1012,62 @@
 
     document.querySelector('[data-modal-hide="admin-modal"]').addEventListener('click', function () {
         hideAdminModal();
+    });
+</script>
+
+
+<script>
+    document.getElementById("registerButton").addEventListener("click", function () {
+        document.getElementById("register-modal").classList.remove("hidden");
+    });
+
+    document.querySelector("[data-modal-hide='register-modal']").addEventListener("click", function () {
+        document.getElementById("register-modal").classList.add("hidden");
+    });
+
+    document.getElementById('registerForm').addEventListener('submit', function (e) {
+        e.preventDefault();
+
+        const teamname = document.getElementById('teamname').value.trim();
+        const fileInput = document.getElementById('reigsterFile');
+        const file = fileInput.files[0];
+        const errorMessage = document.getElementById('errorMessage');
+        const submitBtn = document.getElementById('submitRegisterButton');
+
+        submitBtn.disabled = true;
+        submitBtn.textContent = 'Submiting...';
+
+        errorMessage.textContent = '';
+        errorMessage.classList.add('hidden');
+
+        if (!teamname) {
+            errorMessage.textContent = 'Team name is required.';
+            errorMessage.classList.remove('hidden');
+            return;
+        }
+
+        if (!file) {
+            errorMessage.textContent = 'Please upload a file.';
+            errorMessage.classList.remove('hidden');
+            return;
+        }
+
+        const formData = new FormData();
+        formData.append('teamname', teamname);
+        formData.append('file', file);
+        fetch('/register', { method: 'POST', body: formData })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    document.getElementById('register-modal').classList.add("hidden");
+                    window.location.reload();
+                } else {
+                    submitBtn.disabled = false;
+                    submitBtn.textContent = 'Submit';
+                    errorMessage.textContent = data.response || 'An error occurred.';
+                    errorMessage.classList.remove('hidden');
+                }
+            })
     });
 </script>
 

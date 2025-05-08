@@ -3,6 +3,7 @@ import io
 import json
 import os
 import time
+import uuid
 from dataclasses import dataclass
 
 import pandas as pd
@@ -11,7 +12,7 @@ from loguru import logger
 
 from competitions.enums import SubmissionStatus
 from competitions.info import CompetitionInfo
-from competitions.utils import run_evaluation
+from competitions.utils import run_evaluation, user_token_api
 
 
 _DOCKERFILE = """
@@ -156,12 +157,16 @@ class JobRunner:
         _readme += "colorTo: indigo\n"
         _readme += "sdk: docker\n"
         _readme += "pinned: false\n"
-        _readme += "duplicated_from: autotrain-projects/autotrain-advanced\n"
         _readme += "---\n"
         _readme = io.BytesIO(_readme.encode())
         return _readme
 
     def create_space(self, team_id, submission_id, submission_repo, space_id):
+        server_space_id = space_id + "-server"
+        client_space_id = space_id + "-client"
+        space_auth_token = uuid.uuid4().hex
+        user_token = user_token_api.get(team_id)
+
         api = HfApi(token=self.token)
         params = {
             "competition_id": self.competition_id,
@@ -180,22 +185,36 @@ class JobRunner:
             "submission_filenames": self.submission_filenames,
         }
 
-        api.add_space_secret(repo_id=space_id, key="PARAMS", value=json.dumps(params))
-
+        api.add_space_secret(repo_id=server_space_id, key="PARAMS", value=json.dumps(params))
+        api.add_space_secret(repo_id=server_space_id, key="HUGSIM_AUTH_TOKEN", value=space_auth_token)
+        api.add_space_secret(repo_id=server_space_id, key="HF_TOKEN", value=self.token)
         readme = self._create_readme(space_id.split("/")[-1])
         api.upload_file(
             path_or_fileobj=readme,
             path_in_repo="README.md",
+            repo_id=server_space_id,
+            repo_type="space",
+        )
+        api.upload_file(
+            path_or_fileobj=io.BytesIO(_DOCKERFILE.encode()),
+            path_in_repo="Dockerfile",
             repo_id=space_id,
             repo_type="space",
         )
 
-        _dockerfile = io.BytesIO(_DOCKERFILE.encode())
-        api.upload_file(
-            path_or_fileobj=_dockerfile,
-            path_in_repo="Dockerfile",
-            repo_id=space_id,
+        api.add_space_secret(repo_id=client_space_id, key="HUGSIM_AUTH_TOKEN", value=space_auth_token)
+        api.snapshot_download(
+            repo_id=submission_repo,
+            repo_type="model",
+            revision="main",
+            token=user_token,
+            local_dir="/tmp/data/user_repo",
+            allow_patterns=["*"],
+        )
+        api.upload_folder(
+            repo_id=client_space_id,
             repo_type="space",
+            folder_path="/tmp/data/user_repo",
         )
         self._queue_submission(team_id, submission_id)
 

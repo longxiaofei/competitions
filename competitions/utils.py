@@ -4,11 +4,16 @@ import os
 import shlex
 import subprocess
 import traceback
+import threading
+import uuid
+import base64
+from typing import Optional, Dict, Any
 
 import requests
 from fastapi import Request
 from huggingface_hub import HfApi, hf_hub_download
 from loguru import logger
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from competitions.enums import SubmissionStatus
 from competitions.params import EvalParams
@@ -316,71 +321,203 @@ def is_user_admin(user_token, competition_organization):
     return False
 
 
-def get_team_name(user_token, competition_id, hf_token):
-    user_info = token_information(token=user_token)
-    user_id = user_info["id"]
-    user_team = hf_hub_download(
-        repo_id=competition_id,
-        filename="user_team.json",
-        token=hf_token,
-        repo_type="dataset",
-    )
-    with open(user_team, "r", encoding="utf-8") as f:
-        user_team = json.load(f)
+class TeamAlreadyExistsError(Exception):
+    """Custom exception for when a team already exists."""
+    pass
 
-    if user_id not in user_team:
-        return None
+class TeamFileApi:
+    def __init__(self, hf_token: str, competition_id: str):
+        self.hf_token = hf_token
+        self.competition_id = competition_id
+        self._lock = threading.Lock()
 
-    team_id = user_team[user_id]
+    def _get_team_info(self, user_id: str) -> Optional[Dict[str, Any]]:
+        user_team = hf_hub_download(
+            repo_id=self.competition_id,
+            filename="user_team.json",
+            token=self.hf_token,
+            repo_type="dataset",
+        )
 
-    team_metadata = hf_hub_download(
-        repo_id=competition_id,
-        filename="teams.json",
-        token=hf_token,
-        repo_type="dataset",
-    )
-    with open(team_metadata, "r", encoding="utf-8") as f:
-        team_metadata = json.load(f)
+        with open(user_team, "r", encoding="utf-8") as f:
+            user_team = json.load(f)
 
-    team_name = team_metadata[team_id]["name"]
-    return team_name
+        if user_id not in user_team:
+            return None
+
+        team_id = user_team[user_id]
+
+        team_metadata = hf_hub_download(
+            repo_id=self.competition_id,
+            filename="teams.json",
+            token=self.hf_token,
+            repo_type="dataset",
+        )
+
+        with open(team_metadata, "r", encoding="utf-8") as f:
+            team_metadata = json.load(f)
+
+        return team_metadata[team_id]
+
+    def _create_team(self, user_id: str, team_name: str, team_file: Optional[io.BytesIO]) -> str:
+        with self._lock:
+            user_team = hf_hub_download(
+                repo_id=self.competition_id,
+                filename="user_team.json",
+                token=self.hf_token,
+                repo_type="dataset",
+            )
+            with open(user_team, "r", encoding="utf-8") as f:
+                user_team = json.load(f)
+
+            team_metadata = hf_hub_download(
+                repo_id=self.competition_id,
+                filename="teams.json",
+                token=self.hf_token,
+                repo_type="dataset",
+            )
+
+            with open(team_metadata, "r", encoding="utf-8") as f:
+                team_metadata = json.load(f)
+
+            # create a new team, if user is not in any team
+            team_id = str(uuid.uuid4())
+            user_team[user_id] = team_id
+
+            team_metadata[team_id] = {
+                "id": team_id,
+                "name": team_name,
+                "members": [user_id],
+                "leader": user_id,
+            }
+
+            user_team_json = json.dumps(user_team, indent=4)
+            user_team_json_bytes = user_team_json.encode("utf-8")
+            user_team_json_buffer = io.BytesIO(user_team_json_bytes)
+
+            team_metadata_json = json.dumps(team_metadata, indent=4)
+            team_metadata_json_bytes = team_metadata_json.encode("utf-8")
+            team_metadata_json_buffer = io.BytesIO(team_metadata_json_bytes)
+
+            api = HfApi(token=self.hf_token)
+            api.upload_file(
+                path_or_fileobj=user_team_json_buffer,
+                path_in_repo="user_team.json",
+                repo_id=self.competition_id,
+                repo_type="dataset",
+            )
+            api.upload_file(
+                path_or_fileobj=team_metadata_json_buffer,
+                path_in_repo="teams.json",
+                repo_id=self.competition_id,
+                repo_type="dataset",
+            )
+
+            if team_file is not None:
+                resp = api.upload_file(
+                    path_or_fileobj=team_file,
+                    path_in_repo=f"team_datas/{team_id}.xlsx",
+                    repo_id=self.competition_id,
+                    repo_type="dataset",
+                )
+        return team_id
+    
+    def create_team(self, user_token: str, team_name: str, team_file: io.BytesIO) -> str:
+        user_info = token_information(token=user_token)
+        return self._create_team(user_info["id"], team_name, team_file)
+
+    def get_team_info(self, user_token: str) -> Optional[Dict[str, Any]]:
+        user_info = token_information(token=user_token)
+        return self._get_team_info(user_info["id"])
+
+    def update_and_create_team_name(self, user_token, new_team_name):
+        user_info = token_information(token=user_token)
+        user_id = user_info["id"]
+        team_info = self._get_team_info(user_id)
+        if team_info is None:
+            self._create_team(user_id, new_team_name)
+            return new_team_name
+
+        with self._lock:
+            team_metadata = hf_hub_download(
+                repo_id=self.competition_id,
+                filename="teams.json",
+                token=self.hf_token,
+                repo_type="dataset",
+            )
+            with open(team_metadata, "r", encoding="utf-8") as f:
+                team_metadata = json.load(f)
+
+            team_metadata[team_info["id"]]["name"] = new_team_name
+            team_metadata_json = json.dumps(team_metadata, indent=4)
+            team_metadata_json_bytes = team_metadata_json.encode("utf-8")
+            team_metadata_json_buffer = io.BytesIO(team_metadata_json_bytes)
+            api = HfApi(token=self.hf_token)
+            api.upload_file(
+                path_or_fileobj=team_metadata_json_buffer,
+                path_in_repo="teams.json",
+                repo_id=self.competition_id,
+                repo_type="dataset",
+            )
+        return new_team_name
 
 
-def update_team_name(user_token, new_team_name, competition_id, hf_token):
-    user_info = token_information(token=user_token)
-    user_id = user_info["id"]
-    user_team = hf_hub_download(
-        repo_id=competition_id,
-        filename="user_team.json",
-        token=hf_token,
-        repo_type="dataset",
-    )
-    with open(user_team, "r", encoding="utf-8") as f:
-        user_team = json.load(f)
+team_file_api = TeamFileApi(
+    os.environ.get("HF_TOKEN", None),
+    os.environ.get("COMPETITION_ID"),
+)
 
-    if user_id not in user_team:
-        raise Exception("User is not part of a team")
 
-    team_id = user_team[user_id]
+class UserTokenApi:
+    def __init__(self, hf_token: str, key_base64: str, competition_id: str):
+        self.hf_token = hf_token
+        self.key = base64.b64decode(key_base64)
+        self.competition_id = competition_id
+    
+    def _encrypt(self, text: str) -> str:
+        aesgcm = AESGCM(self.key)
+        nonce = os.urandom(12)
+        encrypted_data = aesgcm.encrypt(nonce, text.encode(), None)
+        return base64.b64encode(nonce + encrypted_data).decode()
 
-    team_metadata = hf_hub_download(
-        repo_id=competition_id,
-        filename="teams.json",
-        token=hf_token,
-        repo_type="dataset",
-    )
-    with open(team_metadata, "r", encoding="utf-8") as f:
-        team_metadata = json.load(f)
+    def _decrypt(self, encrypted_text: str) -> str:
+        aesgcm = AESGCM(self.key)
+        data = base64.b64decode(encrypted_text)
+        nonce = data[:12]
+        ciphertext = data[12:]
+        plaintext = aesgcm.decrypt(nonce, ciphertext, None)
+        return plaintext.decode()
+    
+    def put(self, team_id: str, user_token: str):
+        encrypted_token = self._encrypt(user_token)
+        api = HfApi(token=self.hf_token)
+        api.upload_file(
+            path_or_fileobj=io.BytesIO(encrypted_token.encode()),
+            path_in_repo=f"team_user_tokens/{team_id}",
+            repo_id=self.competition_id,
+            repo_type="dataset",
+        )
 
-    team_metadata[team_id]["name"] = new_team_name
-    team_metadata_json = json.dumps(team_metadata, indent=4)
-    team_metadata_json_bytes = team_metadata_json.encode("utf-8")
-    team_metadata_json_buffer = io.BytesIO(team_metadata_json_bytes)
-    api = HfApi(token=hf_token)
-    api.upload_file(
-        path_or_fileobj=team_metadata_json_buffer,
-        path_in_repo="teams.json",
-        repo_id=competition_id,
-        repo_type="dataset",
-    )
-    return new_team_name
+    def get(self, team_id: str) -> Optional[str]:
+        try:
+            user_token = hf_hub_download(
+                repo_id=self.competition_id,
+                filename=f"team_user_tokens/{team_id}",
+                token=self.hf_token,
+                repo_type="dataset",
+            )
+        except Exception as e:
+            logger.error(f"Failed to download user token - {e}")
+            return None
+
+        with open(user_token, "r", encoding="utf-8") as f:
+            encrypted_token = f.read()
+
+        return self._decrypt(encrypted_token)
+
+
+user_token_api = UserTokenApi(
+    os.environ.get("HF_TOKEN", None),
+    os.environ.get("USER_TOKEN_KEY_BASE64"),
+    os.environ.get("COMPETITION_ID")
+)
