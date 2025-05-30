@@ -5,12 +5,12 @@ from dataclasses import dataclass
 from datetime import datetime
 
 import pandas as pd
-from huggingface_hub import HfApi, hf_hub_download
+from huggingface_hub import HfApi, hf_hub_download, SpaceHardware
 from huggingface_hub.utils._errors import EntryNotFoundError
 
 from competitions.enums import SubmissionStatus
 from competitions.errors import AuthenticationError, PastDeadlineError, SubmissionError, SubmissionLimitError
-from competitions.utils import token_information, team_file_api, user_token_api
+from competitions.utils import token_information, team_file_api, user_token_api, server_manager
 
 
 @dataclass
@@ -86,6 +86,8 @@ class Submissions:
                 "selected": False,
                 "public_score": {},
                 "private_score": {},
+                "server_url": server_manager.get_next_server(),
+                "hardware": self.hardware,
             }
         )
         # count the number of times user has submitted today
@@ -179,6 +181,15 @@ class Submissions:
         return self._get_team_subs(team_id, private=private)
 
     def _create_submission(self, team_id: str):
+        api = HfApi(token=self.token)
+
+        if api.file_exists(
+            repo_id=self.competition_id,
+            filename=f"submission_info/{team_id}.json",
+            repo_type="dataset",
+        ):
+            return
+
         team_submission_info = {}
         team_submission_info["id"] = team_id
         team_submission_info["submissions"] = []
@@ -186,7 +197,6 @@ class Submissions:
         team_submission_info_json_bytes = team_submission_info_json.encode("utf-8")
         team_submission_info_json_buffer = io.BytesIO(team_submission_info_json_bytes)
 
-        api = HfApi(token=self.token)
         api.upload_file(
             path_or_fileobj=team_submission_info_json_buffer,
             path_in_repo=f"submission_info/{team_id}.json",
@@ -231,31 +241,11 @@ class Submissions:
             return self.submission_limit - submissions_made
 
         user_api = HfApi(token=user_token)
-        # submission_id is the sha of the submitted model repo + "__" + submission_id
         submission_id = user_api.model_info(repo_id=uploaded_file).sha + "__" + submission_id
         competition_organizer = self.competition_id.split("/")[0]
         space_id = f"{competition_organizer}/comp-{submission_id}"
-        server_space_id = space_id + "-server"
-        client_space_id = space_id + "-client"
 
-        api = HfApi(token=self.token)
-        api.create_repo(
-            repo_id=server_space_id,
-            repo_type="space",
-            space_sdk="docker",
-            space_hardware=self.hardware,
-            private=False,
-        )
-        api.create_repo(
-            repo_id=client_space_id,
-            repo_type="space",
-            space_sdk="docker",
-            space_hardware=self.hardware,
-            private=True,
-        )
         user_token_api.put(team_id, user_token)
-        
-        # api.add_space_secret(repo_id=space_id, key="USER_TOKEN", value=user_token)
         submissions_made = self._increment_submissions(
             team_id=team_id,
             user_id=user_id,

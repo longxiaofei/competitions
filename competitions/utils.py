@@ -7,13 +7,15 @@ import traceback
 import threading
 import uuid
 import base64
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
+from collections import defaultdict
 
 import requests
 from fastapi import Request
 from huggingface_hub import HfApi, hf_hub_download
 from loguru import logger
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from huggingface_hub import SpaceStage
 
 from competitions.enums import SubmissionStatus
 from competitions.params import EvalParams
@@ -520,4 +522,110 @@ user_token_api = UserTokenApi(
     os.environ.get("HF_TOKEN", None),
     os.environ.get("USER_TOKEN_KEY_BASE64"),
     os.environ.get("COMPETITION_ID")
+)
+
+
+class ServerManager:
+    def __init__(self, server_url_list: List[str]):
+        self.server_url_list = server_url_list
+        self._cur_index = 0
+        self._lock = threading.Lock()
+    
+    def get_next_server(self) -> str:
+        with self._lock:
+            server_url = self.server_url_list[self._cur_index]
+            self._cur_index = (self._cur_index + 1) % len(self.server_url_list)
+        return server_url
+    
+
+server_manager = ServerManager(["https://xdimlab-hugsim-web-server-0.hf.space"])
+
+
+class SubmissionApi:
+    def __init__(self, hf_token: str, competition_id: str):
+        self.hf_token = hf_token
+        self.competition_id = competition_id
+        self.api = HfApi(token=hf_token)
+    
+    def download_submission_info(self, team_id: str) -> Dict[str, Any]:
+        """
+        Download the submission info from Hugging Face Hub.
+        Args:
+            team_id (str): The team ID.
+        Returns:
+            Dict[str, Any]: The submission info.
+        """
+        submission_info_path = self.api.hf_hub_download(
+            repo_id=self.competition_id,
+            filename=f"submission_info/{team_id}.json",
+            repo_type="dataset",
+        )
+        with open(submission_info_path, 'r') as f:
+            submission_info = json.load(f)
+        
+        return submission_info
+
+    def upload_submission_info(self, team_id: str, user_submission_info: Dict[str, Any]):
+        user_submission_info_json = json.dumps(user_submission_info, indent=4)
+        user_submission_info_json_bytes = user_submission_info_json.encode("utf-8")
+        user_submission_info_json_buffer = io.BytesIO(user_submission_info_json_bytes)
+        self.api.upload_file(
+            path_or_fileobj=user_submission_info_json_buffer,
+            path_in_repo=f"submission_info/{team_id}.json",
+            repo_id=self.competition_id,
+            repo_type="dataset",
+        )
+
+    def update_submission_status(self, team_id: str, submission_id: str, status: int):
+        user_submission_info = self.download_submission_info(team_id)
+        for submission in user_submission_info["submissions"]:
+            if submission["submission_id"] == submission_id:
+                submission["status"] = status
+                break
+        self.upload_submission_info(team_id, user_submission_info)
+
+
+submission_api = SubmissionApi(
+    hf_token=os.environ.get("HF_TOKEN", None),
+    competition_id=os.environ.get("COMPETITION_ID")
+)
+
+
+class SpaceCleaner:
+    def __init__(self, hf_token: str):
+        self.hf_token = hf_token
+        self.api = HfApi(token=hf_token)
+        self.space_build_error_count = defaultdict(int)
+    
+    def delete_space(self, space_id: str):
+        """Delete a space by its ID."""
+        self.api.delete_repo(repo_id=space_id, repo_type="space")
+
+    def clean_space(self, space_id: str, team_id: str, submission_id: str):
+        space_info = self.api.space_info(repo_id=space_id)
+        if space_info.runtime.stage == SpaceStage.BUILD_ERROR:
+            self.space_build_error_count[space_id] += 1
+            if self.space_build_error_count[space_id] >= 3:
+                self.delete_space(space_id)
+                submission_api.update_submission_status(
+                    team_id=team_id,
+                    submission_id=submission_id,
+                    status=SubmissionStatus.FAILED.value
+                )
+            else:
+                self.api.restart_space(repo_id=space_id)
+            return
+        
+        if space_info.runtime.stage == SpaceStage.RUNTIME_ERROR:
+            self.delete_space(space_id)
+            submission_api.update_submission_status(
+                team_id=team_id,
+                submission_id=submission_id,
+                status=SubmissionStatus.FAILED.value
+            )
+            return
+
+
+space_cleaner = SpaceCleaner(
+    os.environ.get("HF_TOKEN", None),
 )

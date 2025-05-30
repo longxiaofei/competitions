@@ -4,7 +4,10 @@ import json
 import os
 import time
 import uuid
+import shutil
 from dataclasses import dataclass
+from typing import List, Dict, Any
+from collections import defaultdict
 
 import pandas as pd
 from huggingface_hub import HfApi, hf_hub_download, snapshot_download
@@ -12,17 +15,7 @@ from loguru import logger
 
 from competitions.enums import SubmissionStatus
 from competitions.info import CompetitionInfo
-from competitions.utils import run_evaluation, user_token_api
-
-
-_DOCKERFILE = """
-FROM huggingface/competitions:latest
-
-CMD uvicorn competitions.api:api --port 7860 --host 0.0.0.0
-"""
-
-# format _DOCKERFILE
-_DOCKERFILE = _DOCKERFILE.replace("\n", " ").replace("  ", "\n").strip()
+from competitions.utils import user_token_api, space_cleaner
 
 
 @dataclass
@@ -43,7 +36,7 @@ class JobRunner:
         self.dataset = self.competition_info.dataset
         self.submission_filenames = self.competition_info.submission_filenames
 
-    def get_pending_subs(self):
+    def _get_all_submissions(self) -> List[Dict[str, Any]]:
         submission_jsons = snapshot_download(
             repo_id=self.competition_id,
             allow_patterns="submission_info/*.json",
@@ -51,21 +44,32 @@ class JobRunner:
             repo_type="dataset",
         )
         submission_jsons = glob.glob(os.path.join(submission_jsons, "submission_info/*.json"))
-        pending_submissions = []
-        for _json in submission_jsons:
-            _json = json.load(open(_json, "r", encoding="utf-8"))
+        all_submissions = []
+        for _json_path in submission_jsons:
+            with open(_json_path, "r", encoding="utf-8") as f:
+                _json = json.load(f)
             team_id = _json["id"]
             for sub in _json["submissions"]:
-                if sub["status"] == SubmissionStatus.PENDING.value:
-                    pending_submissions.append(
-                        {
-                            "team_id": team_id,
-                            "submission_id": sub["submission_id"],
-                            "datetime": sub["datetime"],
-                            "submission_repo": sub["submission_repo"],
-                            "space_id": sub["space_id"],
-                        }
-                    )
+                all_submissions.append(
+                    {
+                        "team_id": team_id,
+                        "submission_id": sub["submission_id"],
+                        "datetime": sub["datetime"],
+                        "status": sub["status"],
+                        "submission_repo": sub["submission_repo"],
+                        "space_id": sub["space_id"],
+                        "server_url": sub["server_url"],
+                        "hardware": sub["hardware"],
+                    }
+                )
+        return all_submissions
+
+
+    def _get_pending_subs(self, submissions: List[Dict[str, Any]]) -> pd.DataFrame:
+        pending_submissions = []
+        for sub in submissions:
+            if sub["status"] == SubmissionStatus.PENDING.value:
+                pending_submissions.append(sub)
         if len(pending_submissions) == 0:
             return None
         logger.info(f"Found {len(pending_submissions)} pending submissions.")
@@ -74,6 +78,13 @@ class JobRunner:
         pending_submissions = pending_submissions.sort_values("datetime")
         pending_submissions = pending_submissions.reset_index(drop=True)
         return pending_submissions
+
+    def _get_server_active_count(self, submissions: List[Dict[str, Any]]) -> Dict[str, int]:
+        server_active_count = defaultdict(int)
+        for sub in submissions:
+            if sub["status"] in {SubmissionStatus.PROCESSING.value, SubmissionStatus.QUEUED.value}:
+                server_active_count[sub["server_url"]] += 1
+        return server_active_count
 
     def _queue_submission(self, team_id, submission_id):
         team_fname = hf_hub_download(
@@ -127,29 +138,7 @@ class JobRunner:
             repo_type="dataset",
         )
 
-    def run_local(self, team_id, submission_id, submission_repo):
-        self._queue_submission(team_id, submission_id)
-        eval_params = {
-            "competition_id": self.competition_id,
-            "competition_type": self.competition_type,
-            "metric": self.metric,
-            "token": self.token,
-            "team_id": team_id,
-            "submission_id": submission_id,
-            "submission_id_col": self.submission_id_col,
-            "submission_cols": self.submission_cols,
-            "submission_rows": self.submission_rows,
-            "output_path": self.output_path,
-            "submission_repo": submission_repo,
-            "time_limit": self.time_limit,
-            "dataset": self.dataset,
-            "submission_filenames": self.submission_filenames,
-        }
-        eval_params = json.dumps(eval_params)
-        eval_pid = run_evaluation(eval_params, local=True, wait=True)
-        logger.info(f"New evaluation process started with pid {eval_pid}.")
-
-    def _create_readme(self, project_name):
+    def _create_readme(self, project_name: str) -> str:
         _readme = "---\n"
         _readme += f"title: {project_name}\n"
         _readme += "emoji: 🚀\n"
@@ -158,92 +147,107 @@ class JobRunner:
         _readme += "sdk: docker\n"
         _readme += "pinned: false\n"
         _readme += "---\n"
-        _readme = io.BytesIO(_readme.encode())
         return _readme
 
-    def create_space(self, team_id, submission_id, submission_repo, space_id):
-        server_space_id = space_id + "-server"
-        client_space_id = space_id + "-client"
-        space_auth_token = uuid.uuid4().hex
+    def create_space(self, team_id, submission_id, submission_repo, space_id, server_url, hardware):
         user_token = user_token_api.get(team_id)
 
         api = HfApi(token=self.token)
         params = {
+            "space_id": space_id,
+            "client_space_id": space_id,
             "competition_id": self.competition_id,
-            "competition_type": self.competition_type,
-            "metric": self.metric,
-            "token": self.token,
             "team_id": team_id,
             "submission_id": submission_id,
-            "submission_id_col": self.submission_id_col,
-            "submission_cols": self.submission_cols,
-            "submission_rows": self.submission_rows,
             "output_path": self.output_path,
             "submission_repo": submission_repo,
             "time_limit": self.time_limit,
             "dataset": self.dataset,
             "submission_filenames": self.submission_filenames,
         }
+        token_info_json = json.dumps(params, indent=4)
+        token_info_json_bytes = token_info_json.encode("utf-8")
+        token_info_json_buffer = io.BytesIO(token_info_json_bytes)
 
-        api.add_space_secret(repo_id=server_space_id, key="PARAMS", value=json.dumps(params))
-        api.add_space_secret(repo_id=server_space_id, key="HUGSIM_AUTH_TOKEN", value=space_auth_token)
-        api.add_space_secret(repo_id=server_space_id, key="HF_TOKEN", value=self.token)
-        readme = self._create_readme(space_id.split("/")[-1])
+        api = HfApi(token=self.token)
+        client_token = uuid.uuid4().hex + uuid.uuid4().hex
+
         api.upload_file(
-            path_or_fileobj=readme,
-            path_in_repo="README.md",
-            repo_id=server_space_id,
-            repo_type="space",
+            path_or_fileobj=token_info_json_buffer,
+            path_in_repo=f"token_data_info/{client_token}.json",
+            repo_id=self.competition_id,
+            repo_type="dataset",
         )
-        api.upload_file(
-            path_or_fileobj=io.BytesIO(_DOCKERFILE.encode()),
-            path_in_repo="Dockerfile",
+        api.create_repo(
             repo_id=space_id,
             repo_type="space",
+            space_sdk="docker",
+            space_hardware=hardware,
+            private=True,
         )
 
-        api.add_space_secret(repo_id=client_space_id, key="HUGSIM_AUTH_TOKEN", value=space_auth_token)
+        api.add_space_secret(repo_id=space_id, key="HUGSIM_API_TOKEN", value=client_token)
+        api.add_space_secret(repo_id=space_id, key="HUGSIM_SERVER_HOST", value=server_url)
+        client_code_local_dir = f"/tmp/data/client_repo/{space_id}"
+        client_commits = api.list_repo_commits(submission_repo, repo_type="model")
         api.snapshot_download(
             repo_id=submission_repo,
             repo_type="model",
-            revision="main",
+            revision=client_commits[0].commit_id,
             token=user_token,
-            local_dir="/tmp/data/user_repo",
+            local_dir=client_code_local_dir,
             allow_patterns=["*"],
         )
-        api.upload_folder(
-            repo_id=client_space_id,
-            repo_type="space",
-            folder_path="/tmp/data/user_repo",
-        )
+        with open(f"{client_code_local_dir}/README.md", "w", encoding="utf-8") as f:
+            f.write(self._create_readme(space_id))
+        try:
+            api.upload_folder(
+                repo_id=space_id,
+                repo_type="space",
+                folder_path=client_code_local_dir,
+            )
+        finally:
+            shutil.rmtree(client_code_local_dir, ignore_errors=True)
         self._queue_submission(team_id, submission_id)
 
     def run(self):
+        cur = 0
         while True:
-            pending_submissions = self.get_pending_subs()
-            if pending_submissions is None:
-                time.sleep(5)
-                continue
-            if self.competition_type == "generic":
-                for _, row in pending_submissions.iterrows():
-                    team_id = row["team_id"]
-                    submission_id = row["submission_id"]
-                    submission_repo = row["submission_repo"]
-                    self.run_local(team_id, submission_id, submission_repo)
-            elif self.competition_type == "script":
-                for _, row in pending_submissions.iterrows():
-                    team_id = row["team_id"]
-                    submission_id = row["submission_id"]
-                    submission_repo = row["submission_repo"]
-                    space_id = row["space_id"]
-                    try:
-                        self.create_space(team_id, submission_id, submission_repo, space_id)
-                    except Exception as e:
-                        logger.error(
-                            f"Failed to create space for {team_id} {submission_id} {submission_repo} {space_id}: {e}"
-                        )
-                        # mark submission as failed
-                        self.mark_submission_failed(team_id, submission_id)
-                        logger.error(f"Marked submission {submission_id} as failed.")
-                        continue
             time.sleep(5)
+            if cur == 10000:
+                cur = 0
+            cur += 1
+            all_submissions = self._get_all_submissions()
+
+            # Clean up spaces every 100 iterations
+            if cur % 100 == 0:
+                for space in all_submissions:
+                    if space["status"] == SubmissionStatus.QUEUED.value:
+                        space_cleaner.clean_space(
+                            space["space_id"],
+                            space["team_id"],
+                            space["submission_id"],
+                        )
+
+            pending_submissions = self._get_pending_subs(all_submissions)
+            if pending_submissions is None:
+                continue
+            first_pending_sub = pending_submissions.iloc[0]
+            server_active_count = self._get_server_active_count(all_submissions)
+
+            if server_active_count[first_pending_sub["server_url"]] >= 1:
+                continue
+            try:
+                self.create_space(first_pending_sub["team_id"], first_pending_sub["submission_id"], first_pending_sub["submission_repo"], first_pending_sub["space_id"], first_pending_sub["server_url"], first_pending_sub["hardware"])
+            except Exception as e:
+                logger.error(
+                    f"Failed to create space for {first_pending_sub['submission_id']}: {e}"
+                )
+                # mark submission as failed
+                self.mark_submission_failed(first_pending_sub['team_id'], first_pending_sub['submission_id'])
+                try:
+                    space_cleaner.delete_space(first_pending_sub["space_id"])
+                except Exception as e:
+                    logger.error(f"Failed to delete space {first_pending_sub['space_id']}: {e}")
+                logger.error(f"Marked submission {first_pending_sub['submission_id']} as failed.")
+                continue
