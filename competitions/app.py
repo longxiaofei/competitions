@@ -15,6 +15,7 @@ from huggingface_hub.utils._errors import EntryNotFoundError
 from loguru import logger
 from pydantic import BaseModel
 from requests.exceptions import RequestException
+from filelock import FileLock, Timeout as FileLockTimeout
 
 from competitions import __version__, utils
 from competitions.errors import AuthenticationError, PastDeadlineError, SubmissionError, SubmissionLimitError
@@ -24,6 +25,8 @@ from competitions.oauth import attach_oauth
 from competitions.runner import JobRunner
 from competitions.submissions import Submissions
 from competitions.text import SUBMISSION_SELECTION_TEXT, SUBMISSION_TEXT
+from competitions.utils import team_file_api, submission_api
+from competitions.enums import SubmissionStatus
 
 
 HF_TOKEN = os.environ.get("HF_TOKEN", None)
@@ -298,22 +301,26 @@ def new_submission(
         if not utils.is_user_admin(user_token, comp_org):
             return {"response": "Competition has not started yet!"}
 
-    competition_info = CompetitionInfo(competition_id=COMPETITION_ID, autotrain_token=HF_TOKEN)
-    sub = Submissions(
-        end_date=competition_info.end_date,
-        submission_limit=competition_info.submission_limit,
-        competition_id=COMPETITION_ID,
-        token=HF_TOKEN,
-        competition_type=competition_info.competition_type,
-        hardware=competition_info.hardware,
-    )
+    team_id = team_file_api.get_team_info(user_token)["id"]
+
+    lock = FileLock(f"./submission_lock/{team_id}.lock", blocking=False)
     try:
-        if competition_info.competition_type == "generic":
-            resp = sub.new_submission(user_token, submission_file, submission_comment)
-            return {"response": f"Success! You have {resp} submissions remaining today."}
-        if competition_info.competition_type == "script":
-            resp = sub.new_submission(user_token, hub_model, submission_comment)
-            return {"response": f"Success! You have {resp} submissions remaining today."}
+        with lock:
+            if submission_api.count_by_status(team_id, [SubmissionStatus.QUEUED, SubmissionStatus.PENDING, SubmissionStatus.PROCESSING]) > 0:
+                return {"response": "Another submission is being processed. Please wait a moment."}
+            competition_info = CompetitionInfo(competition_id=COMPETITION_ID, autotrain_token=HF_TOKEN)
+            sub = Submissions(
+                end_date=competition_info.end_date,
+                submission_limit=competition_info.submission_limit,
+                competition_id=COMPETITION_ID,
+                token=HF_TOKEN,
+                competition_type=competition_info.competition_type,
+                hardware=competition_info.hardware,
+            )
+            if competition_info.competition_type == "script":
+                resp = sub.new_submission(user_token, hub_model, submission_comment)
+                return {"response": f"Success! You have {resp} submissions remaining today."}
+            return {"response": "Invalid competition type"}
     except RequestException:
         return {"response": "Hugging Face Hub is unreachable, please try again later"}
     except AuthenticationError:
@@ -324,7 +331,8 @@ def new_submission(
         return {"response": "Invalid submission file"}
     except SubmissionLimitError:
         return {"response": "Submission limit reached"}
-    return {"response": "Invalid competition type"}
+    except FileLockTimeout:
+        return {"response": "Another submission is being processed. Please wait a moment."}
 
 
 @app.post("/update_selected_submissions", response_class=JSONResponse)

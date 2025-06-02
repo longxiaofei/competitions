@@ -189,70 +189,6 @@ def delete_space(params):
             api.delete_repo(repo_id=os.environ["SPACE_ID"], repo_type="space")
 
 
-def download_submission_info(params):
-    user_fname = hf_hub_download(
-        repo_id=params.competition_id,
-        filename=f"submission_info/{params.team_id}.json",
-        token=params.token,
-        repo_type="dataset",
-    )
-    with open(user_fname, "r", encoding="utf-8") as f:
-        user_submission_info = json.load(f)
-
-    return user_submission_info
-
-
-def upload_submission_info(params, user_submission_info):
-    user_submission_info_json = json.dumps(user_submission_info, indent=4)
-    user_submission_info_json_bytes = user_submission_info_json.encode("utf-8")
-    user_submission_info_json_buffer = io.BytesIO(user_submission_info_json_bytes)
-    api = HfApi(token=params.token)
-    api.upload_file(
-        path_or_fileobj=user_submission_info_json_buffer,
-        path_in_repo=f"submission_info/{params.team_id}.json",
-        repo_id=params.competition_id,
-        repo_type="dataset",
-    )
-
-
-def update_submission_status(params, status):
-    user_submission_info = download_submission_info(params)
-    for submission in user_submission_info["submissions"]:
-        if submission["submission_id"] == params.submission_id:
-            submission["status"] = status
-            break
-    upload_submission_info(params, user_submission_info)
-
-
-def update_submission_score(params, public_score, private_score):
-    user_submission_info = download_submission_info(params)
-    for submission in user_submission_info["submissions"]:
-        if submission["submission_id"] == params.submission_id:
-            submission["public_score"] = public_score
-            submission["private_score"] = private_score
-            submission["status"] = "done"
-            break
-    upload_submission_info(params, user_submission_info)
-
-
-def monitor(func):
-    def wrapper(*args, **kwargs):
-        params = kwargs.get("params", None)
-        if params is None and len(args) > 0:
-            params = args[0]
-
-        try:
-            return func(*args, **kwargs)
-        except Exception as e:
-            error_message = f"""{func.__name__} has failed due to an exception: {traceback.format_exc()}"""
-            logger.error(error_message)
-            logger.error(str(e))
-            update_submission_status(params, SubmissionStatus.FAILED.value)
-            pause_space(params)
-
-    return wrapper
-
-
 def uninstall_requirements(requirements_fname):
     if os.path.exists(requirements_fname):
         # read the requirements.txt
@@ -583,6 +519,11 @@ class SubmissionApi:
                 submission["status"] = status
                 break
         self.upload_submission_info(team_id, user_submission_info)
+    
+    def count_by_status(self, team_id: str, status_list: List[SubmissionStatus]) -> int:
+        user_submission_info = self.download_submission_info(team_id)
+        count = sum(1 for submission in user_submission_info["submissions"] if SubmissionStatus(submission["status"]) in status_list)
+        return count
 
 
 submission_api = SubmissionApi(
