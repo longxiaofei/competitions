@@ -86,6 +86,8 @@ class Submissions:
                 "selected": False,
                 "public_score": {},
                 "private_score": {},
+                "score": {},
+                "error_message": "",
                 "server_url": server_manager.get_next_server(),
                 "hardware": self.hardware,
             }
@@ -153,6 +155,7 @@ class Submissions:
 
         # stringify public_score column
         submissions_df["public_score"] = submissions_df["public_score"].apply(json.dumps)
+        submissions_df["score"] = submissions_df["score"].apply(json.dumps)
 
         if private:
             submissions_df["private_score"] = submissions_df["private_score"].apply(json.dumps)

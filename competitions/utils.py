@@ -7,15 +7,19 @@ import traceback
 import threading
 import uuid
 import base64
+import glob
 from typing import Optional, Dict, Any, List
 from collections import defaultdict
 
 import requests
+import pandas as pd
 from fastapi import Request
 from huggingface_hub import HfApi, hf_hub_download
+from huggingface_hub.utils._errors import RepositoryNotFoundError
 from loguru import logger
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from huggingface_hub import SpaceStage
+from cachetools import cached, TTLCache
 
 from competitions.enums import SubmissionStatus
 from competitions.params import EvalParams
@@ -297,7 +301,7 @@ class TeamFileApi:
 
         return team_metadata[team_id]
 
-    def _create_team(self, user_id: str, team_name: str, team_file: Optional[io.BytesIO]) -> str:
+    def _create_team(self, user_id: str, team_name: str, team_file: Optional[io.BytesIO], email: str) -> str:
         with self._lock:
             user_team = hf_hub_download(
                 repo_id=self.competition_id,
@@ -327,6 +331,7 @@ class TeamFileApi:
                 "name": team_name,
                 "members": [user_id],
                 "leader": user_id,
+                "email": email,
             }
 
             user_team_json = json.dumps(user_team, indent=4)
@@ -360,21 +365,18 @@ class TeamFileApi:
                 )
         return team_id
     
-    def create_team(self, user_token: str, team_name: str, team_file: io.BytesIO) -> str:
+    def create_team(self, user_token: str, team_name: str, team_file: io.BytesIO, email: str) -> str:
         user_info = token_information(token=user_token)
-        return self._create_team(user_info["id"], team_name, team_file)
+        return self._create_team(user_info["id"], team_name, team_file, email)
 
     def get_team_info(self, user_token: str) -> Optional[Dict[str, Any]]:
         user_info = token_information(token=user_token)
         return self._get_team_info(user_info["id"])
 
-    def update_and_create_team_name(self, user_token, new_team_name):
+    def update_team_name(self, user_token, new_team_name):
         user_info = token_information(token=user_token)
         user_id = user_info["id"]
         team_info = self._get_team_info(user_id)
-        if team_info is None:
-            self._create_team(user_id, new_team_name)
-            return new_team_name
 
         with self._lock:
             team_metadata = hf_hub_download(
@@ -483,6 +485,20 @@ class SubmissionApi:
         self.competition_id = competition_id
         self.api = HfApi(token=hf_token)
     
+    def exists_submission_info(self, team_id: str) -> bool:
+        """
+        Check if submission info exists for a given team ID.
+        Args:
+            team_id (str): The team ID.
+        Returns:
+            bool: True if submission info exists, False otherwise.
+        """
+        return self.api.file_exists(
+            repo_id=self.competition_id,
+            filename=f"submission_info/{team_id}.json",
+            repo_type="dataset",
+        )
+
     def download_submission_info(self, team_id: str) -> Dict[str, Any]:
         """
         Download the submission info from Hugging Face Hub.
@@ -512,13 +528,16 @@ class SubmissionApi:
             repo_type="dataset",
         )
 
-    def update_submission_status(self, team_id: str, submission_id: str, status: int):
+    def update_submission_data(self, team_id: str, submission_id: str, data: Dict[str, Any]):
         user_submission_info = self.download_submission_info(team_id)
         for submission in user_submission_info["submissions"]:
             if submission["submission_id"] == submission_id:
-                submission["status"] = status
+                submission.update(data)
                 break
         self.upload_submission_info(team_id, user_submission_info)
+
+    def update_submission_status(self, team_id: str, submission_id: str, status: int):
+        self.update_submission_data(team_id, submission_id, {"status": status})
     
     def count_by_status(self, team_id: str, status_list: List[SubmissionStatus]) -> int:
         user_submission_info = self.download_submission_info(team_id)
@@ -543,7 +562,16 @@ class SpaceCleaner:
         self.api.delete_repo(repo_id=space_id, repo_type="space")
 
     def clean_space(self, space_id: str, team_id: str, submission_id: str):
-        space_info = self.api.space_info(repo_id=space_id)
+        try:
+            space_info = self.api.space_info(repo_id=space_id)
+        except RepositoryNotFoundError:
+            submission_api.update_submission_status(
+                team_id=team_id,
+                submission_id=submission_id,
+                data={"status": SubmissionStatus.FAILED.value, "error_message": "start space failed."},
+
+            )
+            return
         if space_info.runtime.stage == SpaceStage.BUILD_ERROR:
             self.space_build_error_count[space_id] += 1
             if self.space_build_error_count[space_id] >= 3:
@@ -569,4 +597,68 @@ class SpaceCleaner:
 
 space_cleaner = SpaceCleaner(
     os.environ.get("HF_TOKEN", None),
+)
+
+
+class LeaderboardApi:
+    def __init__(self, hf_token: str, competition_id: str):
+        self.hf_token = hf_token
+        self.competition_id = competition_id
+        self.api = HfApi(token=hf_token)
+
+    @cached(cache=TTLCache(maxsize=1, ttl=300))
+    def get_leaderboard(self) -> pd.DataFrame:
+        """
+        Get the leaderboard for the competition.
+        Returns:
+            pd.DataFrame: The leaderboard as a DataFrame.
+        """
+        all_scores = self._get_all_scores()
+        if not all_scores:
+            return pd.DataFrame(columns=["team_id", "team_name", "rc", "hdscore"])
+
+        df = pd.DataFrame(all_scores)
+        df = df.sort_values(by=["hdscore", "rc"], ascending=[False, False])
+        df = df.groupby("team_id").first()
+        df = df.sort_values(by=["hdscore", "rc"], ascending=[False, False])
+        df['rank'] = range(1, len(df) + 1)
+        df.insert(0, 'rank', df.pop('rank'))
+        df.reset_index(drop=True, inplace=True)
+        return df
+
+    def _get_all_scores(self) -> List[Dict[str, Any]]:
+        team_metadata = self.api.hf_hub_download(
+            repo_id=self.competition_id,
+            filename="teams.json",
+            repo_type="dataset",
+        )
+        with open(team_metadata, "r", encoding="utf-8") as f:
+            team_metadata = json.load(f)
+
+        submission_jsons = self.api.snapshot_download(
+            repo_id=self.competition_id,
+            allow_patterns="submission_info/*.json",
+            repo_type="dataset",
+        )
+        submission_jsons = glob.glob(os.path.join(submission_jsons, "submission_info/*.json"))
+        all_scores = []
+        for _json_path in submission_jsons:
+            with open(_json_path, "r", encoding="utf-8") as f:
+                _json = json.load(f)
+            team_id = _json["id"]
+            for sub in _json["submissions"]:
+                if sub["status"] != SubmissionStatus.SUCCESS.value:
+                    continue
+                all_scores.append({
+                    "team_id": team_id,
+                    "team_name": team_metadata[team_id]["name"],
+                    "rc": sub["score"]["rc"],
+                    "hdscore": sub["score"]["hdscore"],
+                })
+        return all_scores
+
+
+leaderboard_api = LeaderboardApi(
+    hf_token=os.environ.get("HF_TOKEN", None),
+    competition_id=os.environ.get("COMPETITION_ID")
 )

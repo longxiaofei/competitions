@@ -25,7 +25,7 @@ from competitions.oauth import attach_oauth
 from competitions.runner import JobRunner
 from competitions.submissions import Submissions
 from competitions.text import SUBMISSION_SELECTION_TEXT, SUBMISSION_TEXT
-from competitions.utils import team_file_api, submission_api
+from competitions.utils import team_file_api, submission_api, leaderboard_api
 from competitions.enums import SubmissionStatus
 
 
@@ -193,35 +193,8 @@ def get_submission_info(request: Request):
 
 
 @app.post("/leaderboard", response_class=JSONResponse)
-def fetch_leaderboard(
-    request: Request, body: LeaderboardRequest, user_token: str = Depends(utils.user_authentication)
-):
-    lb = body.lb
-
-    comp_org = COMPETITION_ID.split("/")[0]
-    if user_token is not None:
-        is_user_admin = utils.is_user_admin(user_token, comp_org)
-    else:
-        is_user_admin = False
-
-    if DISABLE_PUBLIC_LB == 1 and lb == "public" and not is_user_admin:
-        return {"response": "Public leaderboard is disabled by the competition host."}
-
-    competition_info = CompetitionInfo(competition_id=COMPETITION_ID, autotrain_token=HF_TOKEN)
-    leaderboard = Leaderboard(
-        end_date=competition_info.end_date,
-        eval_higher_is_better=competition_info.eval_higher_is_better,
-        max_selected_submissions=competition_info.selection_limit,
-        competition_id=COMPETITION_ID,
-        token=HF_TOKEN,
-        scoring_metric=competition_info.scoring_metric,
-    )
-    if lb == "private":
-        current_utc_time = datetime.datetime.now()
-        if current_utc_time < competition_info.end_date and not is_user_admin:
-            return {"response": f"Private leaderboard will be available on {competition_info.end_date} UTC."}
-    df = leaderboard.fetch(private=lb == "private")
-
+def fetch_leaderboard(_: str = Depends(utils.user_authentication)):
+    df = leaderboard_api.get_leaderboard()
     if len(df) == 0:
         return {"response": "No teams yet. Why not make a submission?"}
     resp = {"response": df.to_markdown(index=False)}
@@ -282,8 +255,6 @@ def my_submissions(request: Request, user_token: str = Depends(utils.user_authen
 
 @app.post("/new_submission", response_class=JSONResponse)
 def new_submission(
-    request: Request,
-    submission_file: UploadFile = File(None),
     hub_model: str = Form(...),
     submission_comment: str = Form(None),
     user_token: str = Depends(utils.user_authentication),
@@ -306,7 +277,7 @@ def new_submission(
     lock = FileLock(f"./submission_lock/{team_id}.lock", blocking=False)
     try:
         with lock:
-            if submission_api.count_by_status(team_id, [SubmissionStatus.QUEUED, SubmissionStatus.PENDING, SubmissionStatus.PROCESSING]) > 0:
+            if submission_api.exists_submission_info(team_id) and submission_api.count_by_status(team_id, [SubmissionStatus.QUEUED, SubmissionStatus.PENDING, SubmissionStatus.PROCESSING]) > 0:
                 return {"response": "Another submission is being processed. Please wait a moment."}
             competition_info = CompetitionInfo(competition_id=COMPETITION_ID, autotrain_token=HF_TOKEN)
             sub = Submissions(
@@ -473,8 +444,9 @@ def register_example_file():
 
 @app.post("/register")
 def register(
-    teamname: str = Form(...),
+    teamname: str = Form(..., max_length=20),
     file: UploadFile = Form(...),
+    email: str = Form(..., max_length=100),
     user_token: str = Depends(utils.user_authentication)
 ):
     if user_token is None:
@@ -487,7 +459,8 @@ def register(
     utils.team_file_api.create_team(
         user_token,
         teamname,
-        file_stream
+        file_stream,
+        email
     )
 
     return {"success": True, "response": "Team created successfully."}

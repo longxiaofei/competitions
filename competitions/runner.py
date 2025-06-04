@@ -112,7 +112,7 @@ class JobRunner:
             repo_type="dataset",
         )
 
-    def mark_submission_failed(self, team_id, submission_id):
+    def mark_submission_failed(self, team_id: str, submission_id: str, error_message: str):
         team_fname = hf_hub_download(
             repo_id=self.competition_id,
             filename=f"submission_info/{team_id}.json",
@@ -125,6 +125,7 @@ class JobRunner:
         for submission in team_submission_info["submissions"]:
             if submission["submission_id"] == submission_id:
                 submission["status"] = SubmissionStatus.FAILED.value
+                submission["error_message"] = error_message
 
         team_submission_info_json = json.dumps(team_submission_info, indent=4)
         team_submission_info_json_bytes = team_submission_info_json.encode("utf-8")
@@ -221,8 +222,10 @@ class JobRunner:
 
             # Clean up spaces every 100 iterations
             if cur % 100 == 0:
+                logger.info("Cleaning up spaces...")
                 for space in all_submissions:
-                    if space["status"] == SubmissionStatus.QUEUED.value:
+                    if space["status"] in {SubmissionStatus.QUEUED.value, SubmissionStatus.PROCESSING.value}:
+                        logger.info(f"Cleaning up space {space['space_id']} for submission {space['submission_id']}")
                         space_cleaner.clean_space(
                             space["space_id"],
                             space["team_id"],
@@ -244,7 +247,7 @@ class JobRunner:
                     f"Failed to create space for {first_pending_sub['submission_id']}: {e}"
                 )
                 # mark submission as failed
-                self.mark_submission_failed(first_pending_sub['team_id'], first_pending_sub['submission_id'])
+                self.mark_submission_failed(first_pending_sub['team_id'], first_pending_sub['submission_id'], "Failed to create space")
                 try:
                     space_cleaner.delete_space(first_pending_sub["space_id"])
                 except Exception as e:

@@ -79,45 +79,45 @@
                         articleLoadingSpinner.classList.add('hidden');
                     });
             }
-            function fetchAndDisplayLeaderboard(leaderboardType) {
-                const articleLoadingSpinner = document.getElementById('articleLoadingSpinner');
-                articleLoadingSpinner.classList.remove('hidden');
+            // function fetchAndDisplayLeaderboard(leaderboardType) {
+            //     const articleLoadingSpinner = document.getElementById('articleLoadingSpinner');
+            //     articleLoadingSpinner.classList.remove('hidden');
 
-                const payload = {
-                    lb: leaderboardType,
-                };
+            //     const payload = {
+            //         lb: leaderboardType,
+            //     };
 
-                fetch('/leaderboard', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify(payload)
-                })
-                    .then(response => {
-                        if (!response.ok) {
-                            throw new Error('Network response was not ok');
-                        }
-                        return response.json();
-                    })
-                    .then(data => {
-                        const contentDiv = document.getElementById('content');
-                        contentDiv.innerHTML = marked.parse(data.response);
-                        articleLoadingSpinner.classList.add('hidden');
-                    })
-                    .catch(error => {
-                        console.error('There has been a problem with your fetch operation:', error);
-                        articleLoadingSpinner.classList.add('hidden');
-                    });
-            }
+            //     fetch('/leaderboard', {
+            //         method: 'POST',
+            //         headers: {
+            //             'Content-Type': 'application/json'
+            //         },
+            //         body: JSON.stringify(payload)
+            //     })
+            //         .then(response => {
+            //             if (!response.ok) {
+            //                 throw new Error('Network response was not ok');
+            //             }
+            //             return response.json();
+            //         })
+            //         .then(data => {
+            //             const contentDiv = document.getElementById('content');
+            //             contentDiv.innerHTML = marked.parse(data.response);
+            //             articleLoadingSpinner.classList.add('hidden');
+            //         })
+            //         .catch(error => {
+            //             console.error('There has been a problem with your fetch operation:', error);
+            //             articleLoadingSpinner.classList.add('hidden');
+            //         });
+            // }
 
-            function fetchAndDisplayPublicLeaderboard() {
-                fetchAndDisplayLeaderboard('public');
-            }
+            // function fetchAndDisplayPublicLeaderboard() {
+            //     fetchAndDisplayLeaderboard('public');
+            // }
 
-            function fetchAndDisplayPrivateLeaderboard() {
-                fetchAndDisplayLeaderboard('private');
-            }
+            // function fetchAndDisplayPrivateLeaderboard() {
+            //     fetchAndDisplayLeaderboard('private');
+            // }
 
             function fetchAndDisplaySubmissions() {
                 const apiEndpoint = '/my_submissions';
@@ -150,23 +150,20 @@
                         if (data.response.submissions && data.response.submissions.length > 0 && data.response.error.length == 0) {
                             // Start building the table HTML
                             let tableHTML = teamNameDiv;
-                            tableHTML += '<table border="1"><tr><th>Datetime</th><th>Submission ID</th><th>Public Score</th><th>Submission Comment</th><th>Selected</th><th>Status</th></tr>';
+                            tableHTML += '<table border="1"><tr><th>Datetime</th><th>Submission ID</th><th>Score</th><th>Status</th></tr>';
 
                             // Iterate over each submission and add it to the table
                             data.response.submissions.forEach(submission => {
                                 tableHTML += `<tr>
                                     <td>${submission.datetime}</td>
                                     <td>${submission.submission_id}</td>
-                                    <td>${submission.public_score}</td>
-                                    <td>${submission.submission_comment}</td>
-                                    <td><input type="checkbox" name="selectedSubmissions" value="${submission.submission_id}" ${submission.selected ? 'checked' : ''}></td>
+                                    <td>${submission.score}</td>
                                     <td>${submission.status}</td>
                                   </tr>`;
                             });
 
                             // Close the table HTML and set it as the content
                             tableHTML += '</table>';
-                            tableHTML += '<button id="updateSelectedSubmissionsButton" type="button" class="confirm text-white bg-green-600 hover:bg-green-800 focus:ring-4 focus:outline-none focus:ring-green-300 font-medium rounded-lg text-sm inline-flex items-center px-5 py-2.5 text-center me-2">Update Selected Submissions</button>';
                             // add a text field which displays team name and a button to update team name
                             contentDiv.innerHTML = marked.parse(data.response.submission_text) + tableHTML;
                             document.getElementById('updateSelectedSubmissionsButton').addEventListener('click', function () {
@@ -269,15 +266,44 @@
                         articleLoadingSpinner.classList.add('hidden');
                     });
             }
+            function fetchAndDisplayLeaderboard() {
+                const articleLoadingSpinner = document.getElementById('articleLoadingSpinner');
+                articleLoadingSpinner.classList.remove('hidden');
+
+                fetch('/leaderboard', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                }).then(response => {
+                    if (!response.ok) {
+                        throw new Error('Network response was not ok');
+                    }
+                    return response.json();
+                }).then(data => {
+                    const contentDiv = document.getElementById('content');
+                    contentDiv.innerHTML = marked.parse(data.response);
+                    articleLoadingSpinner.classList.add('hidden');
+                }).catch(error => {
+                    console.error('There has been a problem with your fetch operation:', error);
+                    articleLoadingSpinner.classList.add('hidden');
+                });
+            }
 
             const homeLink = document.getElementById('home');
             const datasetLink = document.getElementById('dataset');
-            const publicLBLink = document.getElementById('public_lb');
-            const privateLBLink = document.getElementById('private_lb');
+            // const publicLBLink = document.getElementById('public_lb');
+            // const privateLBLink = document.getElementById('private_lb');
             const newSubmission = document.getElementById('new_submission');
             const mySubmissions = document.getElementById('my_submissions');
             const submissionInfo = document.getElementById('submission_info');
             const rulesLink = document.getElementById('rules');
+            const leaderBoardLink = document.getElementById('leaderboard');
+
+            leaderBoardLink.addEventListener('click', function (event) {
+                event.preventDefault(); // Prevent the default link behavior
+                fetchAndDisplayLeaderboard(); // Fetch and display info on click
+            });
 
             // Add a click event listener to the 'Home' link
             homeLink.addEventListener('click', function (event) {
@@ -290,15 +316,15 @@
                 fetchAndDisplayDatasetInfo(); // Fetch and display info on click
             });
 
-            publicLBLink.addEventListener('click', function (event) {
-                event.preventDefault(); // Prevent the default link behavior
-                fetchAndDisplayPublicLeaderboard(); // Fetch and display info on click
-            });
+            // publicLBLink.addEventListener('click', function (event) {
+            //     event.preventDefault(); // Prevent the default link behavior
+            //     fetchAndDisplayPublicLeaderboard(); // Fetch and display info on click
+            // });
 
-            privateLBLink.addEventListener('click', function (event) {
-                event.preventDefault(); // Prevent the default link behavior
-                fetchAndDisplayPrivateLeaderboard(); // Fetch and display info on click
-            });
+            // privateLBLink.addEventListener('click', function (event) {
+            //     event.preventDefault(); // Prevent the default link behavior
+            //     fetchAndDisplayPrivateLeaderboard(); // Fetch and display info on click
+            // });
 
             newSubmission.addEventListener('click', function (event) {
                 event.preventDefault(); // Prevent the default link behavior
@@ -362,7 +388,7 @@
                     document.getElementById("new_submission").classList.remove(...registerRemoveStyle);
                     document.getElementById("new_submission").classList.add(...registerNewStyle);
                 } else {
-                    document.getElementById("logoutButton").style.display = "block";
+                    document.getElementById("registerButton").style.display = "block";
                 }
             });
         }
@@ -418,9 +444,8 @@
                 <span id="rules"></span>
                 {% endif %}
                 <li>
-                    <button type="button"
-                        class="flex items-center w-full p-2 text-base text-gray-900 transition duration-75 rounded-lg group hover:bg-gray-100"
-                        aria-controls="lb-dropdown" data-collapse-toggle="lb-dropdown">
+                    <a href="#" id="leaderboard"
+                        class="flex items-center p-2 text-gray-900 rounded-lg hover:bg-gray-100 group">
                         <svg class="flex-shrink-0 w-5 h-5 text-gray-500 transition duration-75 group-hover:text-gray-900"
                             aria-hidden="true" xmlns="http://www.w3.org/2000/svg" fill="currentColor"
                             viewBox="0 0 18 21">
@@ -428,22 +453,7 @@
                             <path d="M6,17 L16,17 L16,18 L6,18 Z" />
                         </svg>
                         <span class="flex-1 ms-3 text-left rtl:text-right whitespace-nowrap">Leaderboard</span>
-                        <svg class="w-3 h-3" aria-hidden="true" xmlns="http://www.w3.org/2000/svg" fill="none"
-                            viewBox="0 0 10 6">
-                            <path stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                                d="m1 1 4 4 4-4" />
-                        </svg>
-                    </button>
-                    <ul id="lb-dropdown" class="py-2 space-y-2">
-                        <li>
-                            <a href="#" id="public_lb"
-                                class="flex items-center w-full p-2 text-gray-900 transition duration-75 rounded-lg pl-11 group hover:bg-gray-100">Public</a>
-                        </li>
-                        <li>
-                            <a href="#" id="private_lb"
-                                class="flex items-center w-full p-2 text-gray-900 transition duration-75 rounded-lg pl-11 group hover:bg-gray-100">Private</a>
-                        </li>
-                    </ul>
+                    </a>
                 </li>
                 <li>
                     <button type="button"
@@ -689,6 +699,11 @@
                         <div class="grid grid-cols-3 items-center gap-4">
                           <label for="teamname" class="text-sm font-medium text-gray-700 text-right">Team Name</label>
                           <input type="text" id="teamname" name="teamname"
+                            class="col-span-2 px-4 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+                        </div>
+                        <div class="grid grid-cols-3 items-center gap-4">
+                          <label for="email" class="text-sm font-medium text-gray-700 text-right">Email</label>
+                          <input type="text" id="email" name="email"
                             class="col-span-2 px-4 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
                         </div>
                       
@@ -1029,6 +1044,7 @@
         e.preventDefault();
 
         const teamname = document.getElementById('teamname').value.trim();
+        const email = document.getElementById('email').value.trim();
         const fileInput = document.getElementById('reigsterFile');
         const file = fileInput.files[0];
         const errorMessage = document.getElementById('errorMessage');
@@ -1046,6 +1062,12 @@
             return;
         }
 
+        if (!email) {
+            errorMessage.textContent = 'Email is required.';
+            errorMessage.classList.remove('hidden');
+            return;
+        }
+
         if (!file) {
             errorMessage.textContent = 'Please upload a file.';
             errorMessage.classList.remove('hidden');
@@ -1054,6 +1076,7 @@
 
         const formData = new FormData();
         formData.append('teamname', teamname);
+        formData.append('email', email);
         formData.append('file', file);
         fetch('/register', { method: 'POST', body: formData })
             .then(response => response.json())
